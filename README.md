@@ -424,6 +424,23 @@
     gap:8px;
     margin-bottom:4px;
   }
+  .currency-block{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    margin-bottom:16px;
+  }
+  .currency-block:last-child{ margin-bottom:0; }
+  .currency-block-title{
+    font-family:'JetBrains Mono', monospace;
+    font-size:11.5px;
+    font-weight:700;
+    letter-spacing:.08em;
+    color:var(--amber);
+    border-bottom:1.5px dashed var(--line);
+    padding-bottom:6px;
+    margin-bottom:2px;
+  }
   .balance-row{
     display:flex;
     align-items:center;
@@ -541,7 +558,7 @@
 
     <!-- Exchange rate -->
     <div class="section">
-      <div class="section-title"><span class="num">02</span>為替レート（EUR → JPY）</div>
+      <div class="section-title"><span class="num">02</span>為替レート（目安表示のみ・精算には使用しません）</div>
       <div class="rate-row">
         <div class="rate-input-wrap">
           1 EUR = <input type="number" id="rateInput" step="0.01" min="1" /> 円
@@ -619,7 +636,7 @@
 
     <!-- Balances -->
     <div class="section">
-      <div class="section-title"><span class="num">05</span>各自の収支（円換算）</div>
+      <div class="section-title"><span class="num">05</span>各自の収支（ユーロ・円は別々に集計）</div>
       <div class="balance-list" id="balanceList"></div>
     </div>
 
@@ -700,10 +717,6 @@
     }
     return exp.amount / exp.participants.length;
   }
-  function shareJPY(exp, name){
-    return shareOriginal(exp, name) * rateOf(exp);
-  }
-
   // ---- storage ----
   async function save(){
     try{
@@ -745,7 +758,7 @@
     fetchRateBtn.textContent = '最新レートを取得';
   }
   function renderRateNote(){
-    rateNote.textContent = `現在のレート: 1 EUR = ${state.exchangeRate} 円（新しい支払いを記録する際に使われます。過去の記録はその時点のレートのまま変わりません）`;
+    rateNote.textContent = `参考レート: 1 EUR = ${state.exchangeRate} 円（記録一覧の金額の下に目安として表示されるだけで、収支・精算の計算には使いません）`;
   }
 
   // ---- members ----
@@ -970,7 +983,7 @@
       if(exp.currency === 'EUR'){
         const sub = document.createElement('div');
         sub.className = 'amt-sub';
-        sub.textContent = `(${fmtJPY(amountJPY(exp))})`;
+        sub.textContent = `参考: ${fmtJPY(amountJPY(exp))}`;
         actions.appendChild(sub);
       }
       const actionRow = document.createElement('div');
@@ -1037,16 +1050,36 @@
   cancelEditBtn.addEventListener('click', cancelEdit);
 
   // ---- balances & settlement (always JPY) ----
-  function computeBalances(){
+  // 通貨ごとに完全に分離して計算する（レートでの合算はしない）
+  function computeBalances(currency){
     const balance = {};
     state.members.forEach(m => balance[m] = 0);
-    state.expenses.forEach(exp => {
-      balance[exp.payer] = (balance[exp.payer] || 0) + amountJPY(exp);
+    state.expenses.filter(e => e.currency === currency).forEach(exp => {
+      balance[exp.payer] = (balance[exp.payer] || 0) + exp.amount;
       exp.participants.forEach(p => {
-        balance[p] = (balance[p] || 0) - shareJPY(exp, p);
+        balance[p] = (balance[p] || 0) - shareOriginal(exp, p);
       });
     });
     return balance;
+  }
+  function renderBalanceBlock(container, currency, label){
+    const wrap = document.createElement('div');
+    wrap.className = 'currency-block';
+    const h = document.createElement('div');
+    h.className = 'currency-block-title';
+    h.textContent = label;
+    wrap.appendChild(h);
+    const balance = computeBalances(currency);
+    state.members.forEach(name => {
+      const v = balance[name] || 0;
+      const row = document.createElement('div');
+      row.className = 'balance-row';
+      const cls = v > 0.5 ? 'plus' : (v < -0.5 ? 'minus' : 'zero');
+      const sign = v > 0.5 ? '+' : '';
+      row.innerHTML = `<span class="name">${escapeHtml(name)}</span><span class="val ${cls}">${sign}${fmtCur(v, currency)}</span>`;
+      wrap.appendChild(row);
+    });
+    container.appendChild(wrap);
   }
   function renderBalances(){
     balanceList.innerHTML = '';
@@ -1054,19 +1087,11 @@
       balanceList.innerHTML = '<div class="empty-note">メンバーを追加すると収支が表示されます</div>';
       return;
     }
-    const balance = computeBalances();
-    state.members.forEach(name => {
-      const v = balance[name] || 0;
-      const row = document.createElement('div');
-      row.className = 'balance-row';
-      const cls = v > 0.5 ? 'plus' : (v < -0.5 ? 'minus' : 'zero');
-      const sign = v > 0.5 ? '+' : '';
-      row.innerHTML = `<span class="name">${escapeHtml(name)}</span><span class="val ${cls}">${sign}${fmtJPY(v)}</span>`;
-      balanceList.appendChild(row);
-    });
+    renderBalanceBlock(balanceList, 'EUR', 'ユーロ建て');
+    renderBalanceBlock(balanceList, 'JPY', '円建て');
   }
-  function computeSettlements(){
-    const balance = computeBalances();
+  function computeSettlements(currency){
+    const balance = computeBalances(currency);
     const creditors = [];
     const debtors = [];
     Object.entries(balance).forEach(([name, v]) => {
@@ -1088,30 +1113,41 @@
     }
     return result;
   }
+  function renderSettleBlock(container, currency, label){
+    const wrap = document.createElement('div');
+    wrap.className = 'currency-block';
+    const h = document.createElement('div');
+    h.className = 'currency-block-title';
+    h.textContent = label;
+    wrap.appendChild(h);
+    const settlements = computeSettlements(currency);
+    if(settlements.length === 0){
+      wrap.innerHTML += `<div class="all-settled"><div class="stamp">SETTLED</div><div>精算済みです</div></div>`;
+    }else{
+      settlements.forEach(s => {
+        const card = document.createElement('div');
+        card.className = 'settle-ticket';
+        card.innerHTML = `
+          <div class="settle-flow">
+            <span class="from">${escapeHtml(s.from)}</span>
+            <span class="arrow">→</span>
+            <span class="to">${escapeHtml(s.to)}</span>
+          </div>
+          <div class="settle-amt">${fmtCur(s.amount, currency)}</div>
+        `;
+        wrap.appendChild(card);
+      });
+    }
+    container.appendChild(wrap);
+  }
   function renderSettlements(){
     settleList.innerHTML = '';
     if(state.members.length === 0){
       settleList.innerHTML = '<div class="empty-note">メンバーと支払いを記録すると精算結果が表示されます</div>';
       return;
     }
-    const settlements = computeSettlements();
-    if(settlements.length === 0){
-      settleList.innerHTML = `<div class="all-settled"><div class="stamp">SETTLED</div><div>全員の収支が精算済みです</div></div>`;
-      return;
-    }
-    settlements.forEach(s => {
-      const card = document.createElement('div');
-      card.className = 'settle-ticket';
-      card.innerHTML = `
-        <div class="settle-flow">
-          <span class="from">${escapeHtml(s.from)}</span>
-          <span class="arrow">→</span>
-          <span class="to">${escapeHtml(s.to)}</span>
-        </div>
-        <div class="settle-amt">${fmtJPY(s.amount)}</div>
-      `;
-      settleList.appendChild(card);
-    });
+    renderSettleBlock(settleList, 'EUR', 'ユーロでの精算');
+    renderSettleBlock(settleList, 'JPY', '円での精算');
   }
 
   function renderAll(){
